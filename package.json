@@ -1,5 +1,5 @@
 {
-  "name": "@burdenoff/vibe-plugin-code-server",
+  "name": "@vibecontrols/vibe-plugin-code-server",
   "version": "0.0.0-dev",
   "main": "./dist/index.js",
   "type": "module",
@@ -62,7 +62,7 @@
   },
   "homepage": "https://vibecontrols.com",
   "publishConfig": {
-    "access": "public",
+    "access": "restricted",
     "registry": "https://registry.npmjs.org/"
   },
   "files": [
