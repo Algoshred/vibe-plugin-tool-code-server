@@ -91,10 +91,11 @@ export async function startCodeServer(
       "none",
       "--bind-addr",
       `127.0.0.1:${port}`,
-      "--base-path",
-      "/code-server",
+      "--app-name",
+      "VibeControls Editor",
       "--disable-telemetry",
       "--disable-update-check",
+      "--disable-proxy",
       workspacePath,
     ];
 
@@ -103,6 +104,8 @@ export async function startCodeServer(
       stderr: "pipe",
       env: {
         ...process.env,
+        // Remove PORT so code-server doesn't override --bind-addr
+        PORT: undefined,
         // Disable code-server's own proxy auth
         CS_DISABLE_GETTING_STARTED_OVERRIDE: "1",
       },

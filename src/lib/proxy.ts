@@ -5,7 +5,7 @@
  * Handles:
  *   - Session cookie authentication (code-server internal requests can't send API key headers)
  *   - HTTP reverse proxying with streaming
- *   - WebSocket proxying for editor/terminal
+ *   - WebSocket bridging for editor/terminal (client WS ↔ upstream code-server WS)
  *   - Header stripping (X-Frame-Options, CSP) to allow iframe embedding
  */
 
@@ -74,6 +74,34 @@ function getCookie(cookieHeader: string | null, name: string): string | null {
   return match ? match[1] : null;
 }
 
+// ── Auth helpers ─────────────────────────────────────────────────────────
+
+function isAuthed(
+  request: Request,
+  validateApiKey: (key: string) => boolean,
+): { hasValidSession: boolean; hasValidApiKey: boolean } {
+  const cookieHeader = request.headers.get("cookie");
+  const sessionToken = getCookie(cookieHeader, COOKIE_NAME);
+  const apiKeyHeader = request.headers.get("x-agent-api-key");
+  const url = new URL(request.url);
+  const apiKeyParam = url.searchParams.get("apiKey");
+
+  const hasValidSession = sessionToken
+    ? validateSessionToken(sessionToken)
+    : false;
+  const hasValidApiKey =
+    (apiKeyHeader != null && validateApiKey(apiKeyHeader)) ||
+    (apiKeyParam != null && validateApiKey(apiKeyParam));
+
+  return { hasValidSession, hasValidApiKey };
+}
+
+// ── Path helpers ─────────────────────────────────────────────────────────
+
+function stripPrefix(pathname: string): string {
+  return pathname.replace(/^\/code-server\/?/, "/") || "/";
+}
+
 // ── Headers to strip from proxied responses (for iframe embedding) ───────
 
 const STRIP_RESPONSE_HEADERS = new Set([
@@ -81,6 +109,19 @@ const STRIP_RESPONSE_HEADERS = new Set([
   "content-security-policy",
   "x-content-type-options",
 ]);
+
+// ── WebSocket bridge state ───────────────────────────────────────────────
+
+interface BridgeState {
+  upstream: WebSocket | null;
+  upstreamReady: boolean;
+  buffer: Array<string | ArrayBufferLike>;
+}
+
+const bridges = new Map<string, BridgeState>();
+let bridgeCounter = 0;
+
+// ── Create proxy ─────────────────────────────────────────────────────────
 
 /**
  * Create the reverse proxy Elysia instance.
@@ -93,13 +134,189 @@ export function createCodeServerProxy(
   validateApiKey: (key: string) => boolean,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
 ): any {
-  return new Elysia({ prefix: "/code-server" })
-    .all("/*", async ({ request }) => {
-      return handleProxyRequest(request, getPort, validateApiKey);
-    })
-    .all("/", async ({ request }) => {
-      return handleProxyRequest(request, getPort, validateApiKey);
-    });
+  return (
+    new Elysia({ prefix: "/code-server" })
+      // ── WebSocket bridge for code-server remote connections ──────
+      .ws("/*", {
+        open(ws) {
+          const wsData = ws.data as unknown as {
+            request?: Request;
+            headers?: Record<string, string | undefined>;
+            query?: Record<string, string | undefined>;
+          };
+
+          // Auth: check session cookie from the upgrade request headers
+          const cookieHeader =
+            wsData.headers?.cookie ??
+            (wsData.request?.headers?.get("cookie") || null);
+          const sessionToken = getCookie(cookieHeader ?? null, COOKIE_NAME);
+          const apiKeyParam = wsData.query?.apiKey ?? null;
+
+          const hasSession = sessionToken
+            ? validateSessionToken(sessionToken)
+            : false;
+          const hasKey = apiKeyParam ? validateApiKey(apiKeyParam) : false;
+
+          if (!hasSession && !hasKey) {
+            ws.close(1008, "Unauthorized");
+            return;
+          }
+
+          const port = getPort();
+          if (!port) {
+            ws.close(1011, "code-server not running");
+            return;
+          }
+
+          // Determine upstream path from the original request URL
+          const requestUrl =
+            wsData.request?.url ??
+            (wsData.headers?.["x-forwarded-uri"] || "/code-server/");
+          let upstreamPath: string;
+          try {
+            const url = new URL(requestUrl, `http://127.0.0.1:${port}`);
+            upstreamPath = stripPrefix(url.pathname) + url.search;
+          } catch {
+            upstreamPath = "/";
+          }
+
+          const bridgeId = `cs-bridge-${++bridgeCounter}`;
+          (wsData as Record<string, unknown>)._bridgeId = bridgeId;
+
+          const state: BridgeState = {
+            upstream: null,
+            upstreamReady: false,
+            buffer: [],
+          };
+          bridges.set(bridgeId, state);
+
+          // Connect upstream WS to code-server
+          const upstreamUrl = `ws://127.0.0.1:${port}${upstreamPath}`;
+          const upstreamWs = new WebSocket(upstreamUrl);
+          state.upstream = upstreamWs;
+
+          upstreamWs.addEventListener("open", () => {
+            state.upstreamReady = true;
+            // Flush buffered messages
+            for (const msg of state.buffer) {
+              upstreamWs.send(msg);
+            }
+            state.buffer.length = 0;
+          });
+
+          // Forward: upstream code-server → client browser
+          upstreamWs.addEventListener("message", (event) => {
+            try {
+              const data = event.data;
+              if (data instanceof ArrayBuffer) {
+                ws.send(new Uint8Array(data));
+              } else if (data instanceof Blob) {
+                data.arrayBuffer().then((ab) => {
+                  try {
+                    ws.send(new Uint8Array(ab));
+                  } catch {
+                    /* client gone */
+                  }
+                });
+              } else {
+                ws.send(data);
+              }
+            } catch {
+              /* client gone */
+            }
+          });
+
+          upstreamWs.addEventListener("close", (event) => {
+            bridges.delete(bridgeId);
+            try {
+              ws.close(event.code || 1000, event.reason || "Upstream closed");
+            } catch {
+              /* already closed */
+            }
+          });
+
+          upstreamWs.addEventListener("error", () => {
+            bridges.delete(bridgeId);
+            try {
+              ws.close(1011, "Upstream error");
+            } catch {
+              /* already closed */
+            }
+          });
+        },
+
+        message(ws, message) {
+          const wsData = ws.data as unknown as { _bridgeId?: string };
+          const bridgeId = wsData._bridgeId;
+          if (!bridgeId) return;
+
+          const state = bridges.get(bridgeId);
+          if (!state) return;
+
+          // Normalise message
+          let payload: string | ArrayBuffer;
+          if (typeof message === "string") {
+            payload = message;
+          } else if (message instanceof ArrayBuffer) {
+            payload = message;
+          } else if (
+            message instanceof Uint8Array ||
+            Buffer.isBuffer(message)
+          ) {
+            const copy = new ArrayBuffer(message.byteLength);
+            new Uint8Array(copy).set(
+              new Uint8Array(
+                message.buffer,
+                message.byteOffset,
+                message.byteLength,
+              ),
+            );
+            payload = copy;
+          } else if (typeof message === "object" && message !== null) {
+            payload = JSON.stringify(message);
+          } else {
+            payload = String(message);
+          }
+
+          if (
+            state.upstream &&
+            state.upstreamReady &&
+            state.upstream.readyState === WebSocket.OPEN
+          ) {
+            try {
+              state.upstream.send(payload);
+            } catch {
+              /* upstream gone */
+            }
+          } else {
+            state.buffer.push(payload);
+          }
+        },
+
+        close(ws) {
+          const wsData = ws.data as unknown as { _bridgeId?: string };
+          const bridgeId = wsData._bridgeId;
+          if (bridgeId) {
+            const state = bridges.get(bridgeId);
+            if (
+              state?.upstream &&
+              state.upstream.readyState === WebSocket.OPEN
+            ) {
+              state.upstream.close(1000, "Client disconnected");
+            }
+            bridges.delete(bridgeId);
+          }
+        },
+      })
+
+      // ── HTTP proxy: all paths ───────────────────────────────────
+      .all("/*", async ({ request }) => {
+        return handleProxyRequest(request, getPort, validateApiKey);
+      })
+      .all("/", async ({ request }) => {
+        return handleProxyRequest(request, getPort, validateApiKey);
+      })
+  );
 }
 
 async function handleProxyRequest(
@@ -107,20 +324,7 @@ async function handleProxyRequest(
   getPort: () => number | null,
   validateApiKey: (key: string) => boolean,
 ): Promise<Response> {
-  // ── Auth check ────────────────────────────────────────────────
-
-  const cookieHeader = request.headers.get("cookie");
-  const sessionToken = getCookie(cookieHeader, COOKIE_NAME);
-  const apiKeyHeader = request.headers.get("x-agent-api-key");
-  const url = new URL(request.url);
-  const apiKeyParam = url.searchParams.get("apiKey");
-
-  const hasValidSession = sessionToken
-    ? validateSessionToken(sessionToken)
-    : false;
-  const hasValidApiKey =
-    (apiKeyHeader && validateApiKey(apiKeyHeader)) ||
-    (apiKeyParam && validateApiKey(apiKeyParam));
+  const { hasValidSession, hasValidApiKey } = isAuthed(request, validateApiKey);
 
   if (!hasValidSession && !hasValidApiKey) {
     return new Response(
@@ -131,25 +335,17 @@ async function handleProxyRequest(
     );
   }
 
-  // If authenticated via API key but no session cookie, create one and redirect
+  // If authenticated via API key but no session cookie, create session and
+  // serve the proxied content directly (with Set-Cookie header).
+  // We avoid a 302 redirect because cross-origin iframes won't carry the
+  // cookie on the redirected request (SameSite restrictions).
+  let sessionCookieHeader: string | null = null;
   if (!hasValidSession && hasValidApiKey) {
     const session = createSession();
-
-    // Strip apiKey from URL if present and redirect
-    url.searchParams.delete("apiKey");
-    const redirectUrl = url.pathname + url.search;
-
-    return new Response(null, {
-      status: 302,
-      headers: {
-        Location: redirectUrl,
-        "Set-Cookie": `${COOKIE_NAME}=${session.token}; Path=/code-server/; HttpOnly; SameSite=Lax; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`,
-      },
-    });
+    sessionCookieHeader = `${COOKIE_NAME}=${session.token}; Path=/code-server/; HttpOnly; SameSite=None; Secure; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`;
   }
 
-  // ── Verify code-server is running ─────────────────────────────
-
+  // Verify code-server is running
   const port = getPort();
   if (!port) {
     return new Response(
@@ -158,16 +354,20 @@ async function handleProxyRequest(
     );
   }
 
-  // ── Check for WebSocket upgrade ───────────────────────────────
+  const response = await handleHttpProxy(request, port);
 
-  const upgradeHeader = request.headers.get("upgrade");
-  if (upgradeHeader?.toLowerCase() === "websocket") {
-    return handleWebSocketProxy(request, port);
+  // Attach the session cookie to the proxied response
+  if (sessionCookieHeader) {
+    const headers = new Headers(response.headers);
+    headers.set("Set-Cookie", sessionCookieHeader);
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers,
+    });
   }
 
-  // ── HTTP reverse proxy ────────────────────────────────────────
-
-  return handleHttpProxy(request, port);
+  return response;
 }
 
 /**
@@ -178,9 +378,8 @@ async function handleHttpProxy(
   port: number,
 ): Promise<Response> {
   const url = new URL(request.url);
-
-  // Construct upstream URL — code-server expects paths under /code-server/
-  const upstreamUrl = `http://127.0.0.1:${port}${url.pathname}${url.search}`;
+  const strippedPath = stripPrefix(url.pathname);
+  const upstreamUrl = `http://127.0.0.1:${port}${strippedPath}${url.search}`;
 
   // Build upstream headers (copy most, skip hop-by-hop)
   const upstreamHeaders = new Headers();
@@ -232,51 +431,6 @@ async function handleHttpProxy(
     return new Response(
       JSON.stringify({
         error: "Failed to proxy to code-server",
-        details: err instanceof Error ? err.message : "Unknown error",
-      }),
-      {
-        status: 502,
-        headers: { "Content-Type": "application/json" },
-      },
-    );
-  }
-}
-
-/**
- * Proxy a WebSocket upgrade request to the local code-server instance.
- *
- * Forwards the upgrade request as-is to the upstream code-server.
- * Bun's fetch supports WebSocket upgrades natively via the standard
- * Request/Response mechanism.
- */
-async function handleWebSocketProxy(
-  request: Request,
-  port: number,
-): Promise<Response> {
-  const url = new URL(request.url);
-  const upstreamUrl = `http://127.0.0.1:${port}${url.pathname}${url.search}`;
-
-  try {
-    // Forward the upgrade request to code-server
-    // Bun handles WebSocket upgrade transparently
-    const upstreamHeaders = new Headers();
-    request.headers.forEach((value, key) => {
-      upstreamHeaders.set(key, value);
-    });
-    upstreamHeaders.set("Host", `127.0.0.1:${port}`);
-
-    const response = await fetch(upstreamUrl, {
-      method: request.method,
-      headers: upstreamHeaders,
-      body: request.body,
-      redirect: "manual",
-    });
-
-    return response;
-  } catch (err) {
-    return new Response(
-      JSON.stringify({
-        error: "WebSocket proxy failed",
         details: err instanceof Error ? err.message : "Unknown error",
       }),
       {

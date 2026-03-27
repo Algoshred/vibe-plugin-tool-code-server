@@ -8,6 +8,7 @@
   },
   "scripts": {
     "build": "bun run tsc",
+    "dev": "tsc --watch",
     "lint": "eslint ./src",
     "format": "bunx prettier . --write",
     "format:check": "bunx prettier . --check",
