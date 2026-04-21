@@ -3,3 +3,6 @@ dist/
 *.log
 .env
 .env.local
+
+.build-sha
+**/.build-sha
