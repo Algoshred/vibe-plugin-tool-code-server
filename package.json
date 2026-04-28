@@ -1,6 +1,6 @@
 {
-  "name": "@vibecontrols/vibe-plugin-code-server",
-  "version": "2026.428.1",
+  "name": "@vibecontrols/vibe-plugin-tool-code-server",
+  "version": "2026.428.3",
   "main": "./dist/index.js",
   "type": "module",
   "engines": {
@@ -56,14 +56,14 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/algoshred/vibe-plugin-code-server.git"
+    "url": "git+https://github.com/algoshred/vibe-plugin-tool-code-server.git"
   },
   "bugs": {
-    "url": "https://github.com/algoshred/vibe-plugin-code-server/issues"
+    "url": "https://github.com/algoshred/vibe-plugin-tool-code-server/issues"
   },
   "homepage": "https://vibecontrols.com",
   "publishConfig": {
-    "access": "restricted",
+    "access": "public",
     "registry": "https://registry.npmjs.org/"
   },
   "files": [
