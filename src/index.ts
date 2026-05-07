@@ -85,6 +85,12 @@ let agentApiKey: string | null = null;
 // ---------------------------------------------------------------------------
 
 export const vibePlugin: VibePlugin = {
+  capabilities: {
+    storage: "rw",
+    subprocess: true,
+    audit: true,
+    telemetry: true,
+  },
   name: "code-server",
   version: "1.0.0",
   description:
@@ -95,6 +101,7 @@ export const vibePlugin: VibePlugin = {
   publicPaths: ["/code-server/"],
 
   async onServerStart(app: Elysia, hostServices: HostServices) {
+    hostServices?.telemetry?.emit("tool.ready", { provider: "code-server" });
     // Register REST API routes
     const { createCodeServerRoutes } = await import("./routes.js");
     app.use(createCodeServerRoutes(hostServices));
