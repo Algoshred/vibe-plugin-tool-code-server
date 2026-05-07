@@ -17,6 +17,30 @@ import type { Elysia } from "elysia";
 import type { Command } from "commander";
 import type { HostServices, VibePlugin } from "./types.js";
 import { getRunningPort, stopCodeServer } from "./lib/process.js";
+import {
+  runMultimode,
+  pickOutputMode,
+  maybePrintJson,
+  type OutputFlags,
+} from "./utils/multimode.js";
+import { interactiveDetail } from "./utils/interactive.js";
+
+// ---------------------------------------------------------------------------
+// JSON shaping helpers
+// ---------------------------------------------------------------------------
+
+const SECRET_RX = /(token|secret|password|apikey|api_key)/i;
+
+function redact(value: unknown): unknown {
+  if (value === null || value === undefined) return value;
+  if (Array.isArray(value)) return value.map(redact);
+  if (typeof value !== "object") return value;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    out[k] = SECRET_RX.test(k) ? "[redacted]" : redact(v);
+  }
+  return out;
+}
 
 // Re-export types for external consumers
 export type {
@@ -115,21 +139,40 @@ export const vibePlugin: VibePlugin = {
     // vibe code-server status
     cs.command("status")
       .description("Show code-server status")
-      .action(async () => {
-        const res = await apiFetch("/api/code-server/status");
-        const data = await res.json();
-        console.log(JSON.stringify(data, null, 2));
+      .option("--json", "Emit JSON")
+      .option("--plain", "Force plain text output")
+      .action(async (opts: OutputFlags) => {
+        await runMultimode<unknown>({
+          mode: pickOutputMode(opts),
+          fetchData: async () => {
+            const res = await apiFetch("/api/code-server/status");
+            return await res.json();
+          },
+          plain: (data) => {
+            console.log(JSON.stringify(data, null, 2));
+          },
+          interactive: async (data) => {
+            await interactiveDetail({
+              title: "code-server — status",
+              body: JSON.stringify(data, null, 2),
+            });
+          },
+          json: (data) => redact(data),
+        });
       });
 
     // vibe code-server install
     cs.command("install")
       .description("Install code-server on this machine")
-      .action(async () => {
-        console.log("Installing code-server...");
+      .option("--json", "Emit JSON")
+      .action(async (opts: OutputFlags) => {
+        if (!opts.json) console.log("Installing code-server...");
         const res = await apiFetch("/api/code-server/install", {
           method: "POST",
         });
         const data = await res.json();
+        if (maybePrintJson(opts, { ok: true, action: "install", result: data }))
+          return;
         console.log(JSON.stringify(data, null, 2));
       });
 
@@ -138,27 +181,37 @@ export const vibePlugin: VibePlugin = {
       .description("Start code-server")
       .option("--path <dir>", "Workspace directory to open")
       .option("--port <port>", "Port to bind to")
-      .action(async (opts: { path?: string; port?: string }) => {
-        const body: Record<string, unknown> = {};
-        if (opts.path) body.workspacePath = opts.path;
-        if (opts.port) body.port = parseInt(opts.port, 10);
+      .option("--json", "Emit JSON")
+      .action(
+        async (opts: { path?: string; port?: string } & OutputFlags) => {
+          const body: Record<string, unknown> = {};
+          if (opts.path) body.workspacePath = opts.path;
+          if (opts.port) body.port = parseInt(opts.port, 10);
 
-        const res = await apiFetch("/api/code-server/start", {
-          method: "POST",
-          body: JSON.stringify(body),
-        });
-        const data = await res.json();
-        console.log(JSON.stringify(data, null, 2));
-      });
+          const res = await apiFetch("/api/code-server/start", {
+            method: "POST",
+            body: JSON.stringify(body),
+          });
+          const data = await res.json();
+          if (
+            maybePrintJson(opts, { ok: true, action: "start", result: data })
+          )
+            return;
+          console.log(JSON.stringify(data, null, 2));
+        },
+      );
 
     // vibe code-server stop
     cs.command("stop")
       .description("Stop code-server")
-      .action(async () => {
+      .option("--json", "Emit JSON")
+      .action(async (opts: OutputFlags) => {
         const res = await apiFetch("/api/code-server/stop", {
           method: "POST",
         });
         const data = await res.json();
+        if (maybePrintJson(opts, { ok: true, action: "stop", result: data }))
+          return;
         console.log(JSON.stringify(data, null, 2));
       });
 
@@ -166,7 +219,8 @@ export const vibePlugin: VibePlugin = {
     cs.command("restart")
       .description("Restart code-server with optional new workspace")
       .option("--path <dir>", "New workspace directory")
-      .action(async (opts: { path?: string }) => {
+      .option("--json", "Emit JSON")
+      .action(async (opts: { path?: string } & OutputFlags) => {
         const body: Record<string, unknown> = {};
         if (opts.path) body.workspacePath = opts.path;
 
@@ -175,6 +229,10 @@ export const vibePlugin: VibePlugin = {
           body: JSON.stringify(body),
         });
         const data = await res.json();
+        if (
+          maybePrintJson(opts, { ok: true, action: "restart", result: data })
+        )
+          return;
         console.log(JSON.stringify(data, null, 2));
       });
   },
