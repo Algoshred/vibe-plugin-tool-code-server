@@ -41,7 +41,10 @@ interface OpenTuiBox {
 
 interface OpenTuiCore {
   createCliRenderer: (cfg: Record<string, unknown>) => Promise<OpenTuiRenderer>;
-  BoxRenderable: new (ctx: unknown, opts: Record<string, unknown>) => OpenTuiBox;
+  BoxRenderable: new (
+    ctx: unknown,
+    opts: Record<string, unknown>,
+  ) => OpenTuiBox;
   TextRenderable: new (
     ctx: unknown,
     opts: Record<string, unknown>,

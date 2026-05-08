@@ -189,24 +189,20 @@ export const vibePlugin: VibePlugin = {
       .option("--path <dir>", "Workspace directory to open")
       .option("--port <port>", "Port to bind to")
       .option("--json", "Emit JSON")
-      .action(
-        async (opts: { path?: string; port?: string } & OutputFlags) => {
-          const body: Record<string, unknown> = {};
-          if (opts.path) body.workspacePath = opts.path;
-          if (opts.port) body.port = parseInt(opts.port, 10);
+      .action(async (opts: { path?: string; port?: string } & OutputFlags) => {
+        const body: Record<string, unknown> = {};
+        if (opts.path) body.workspacePath = opts.path;
+        if (opts.port) body.port = parseInt(opts.port, 10);
 
-          const res = await apiFetch("/api/code-server/start", {
-            method: "POST",
-            body: JSON.stringify(body),
-          });
-          const data = await res.json();
-          if (
-            maybePrintJson(opts, { ok: true, action: "start", result: data })
-          )
-            return;
-          console.log(JSON.stringify(data, null, 2));
-        },
-      );
+        const res = await apiFetch("/api/code-server/start", {
+          method: "POST",
+          body: JSON.stringify(body),
+        });
+        const data = await res.json();
+        if (maybePrintJson(opts, { ok: true, action: "start", result: data }))
+          return;
+        console.log(JSON.stringify(data, null, 2));
+      });
 
     // vibe code-server stop
     cs.command("stop")
@@ -236,9 +232,7 @@ export const vibePlugin: VibePlugin = {
           body: JSON.stringify(body),
         });
         const data = await res.json();
-        if (
-          maybePrintJson(opts, { ok: true, action: "restart", result: data })
-        )
+        if (maybePrintJson(opts, { ok: true, action: "restart", result: data }))
           return;
         console.log(JSON.stringify(data, null, 2));
       });

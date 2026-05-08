@@ -27,35 +27,10 @@ const SEARCH_PATHS = [
  * then falling back to known installation locations.
  */
 async function resolveBinaryPath(): Promise<string | null> {
-  // Try command -v first
-  try {
-    const proc = Bun.spawn(["command", "-v", "code-server"], {
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const output = await new Response(proc.stdout).text();
-    const exitCode = await proc.exited;
-    if (exitCode === 0 && output.trim()) {
-      return output.trim();
-    }
-  } catch {
-    // command -v not available or failed
-  }
-
-  // Try which
-  try {
-    const proc = Bun.spawn(["which", "code-server"], {
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const output = await new Response(proc.stdout).text();
-    const exitCode = await proc.exited;
-    if (exitCode === 0 && output.trim()) {
-      return output.trim();
-    }
-  } catch {
-    // which not available
-  }
+  // Bun.which works on every platform (POSIX + Windows) and honors PATHEXT
+  // so it picks up `code-server.cmd` on Windows automatically.
+  const found = Bun.which("code-server");
+  if (found) return found;
 
   // Check known paths
   for (const p of SEARCH_PATHS) {
@@ -131,7 +106,18 @@ export async function installCodeServer(
   onLog?.("Downloading and installing code-server...");
 
   try {
-    // Use the official install script with standalone method
+    // The official install script is bash-only. On Windows, point the user
+    // at the standalone download (code-server doesn't ship an installer
+    // we can pipe through `cmd /c`). Refuse cleanly rather than spawn a
+    // missing `sh`.
+    if (process.platform === "win32") {
+      return {
+        success: false,
+        binaryPath: null,
+        error:
+          "Automated install is unsupported on Windows. Install code-server manually from https://github.com/coder/code-server/releases and re-run.",
+      };
+    }
     const installPrefix = path.join(os.homedir(), ".local");
     const proc = Bun.spawn(
       [

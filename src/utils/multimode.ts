@@ -74,13 +74,13 @@ export function pickOutputMode(flags: OutputFlags): OutputMode {
 
 function isCi(): boolean {
   return (
-    !!process.env.CI ||
-    !!process.env.NO_COLOR ||
-    process.env.TERM === "dumb"
+    !!process.env.CI || !!process.env.NO_COLOR || process.env.TERM === "dumb"
   );
 }
 
-export async function runMultimode<T>(opts: MultimodeOptions<T>): Promise<void> {
+export async function runMultimode<T>(
+  opts: MultimodeOptions<T>,
+): Promise<void> {
   const data = await opts.fetchData();
   const mode = opts.mode ?? "auto";
 
