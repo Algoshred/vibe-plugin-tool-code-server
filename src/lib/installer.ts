@@ -8,7 +8,7 @@
 
 import os from "node:os";
 import path from "node:path";
-import type { StorageProvider } from "../types.js";
+import type { AgentStorageProvider as StorageProvider } from "../types.js";
 
 const STORAGE_NS = "code-server";
 const KEY_INSTALLED = "installed";

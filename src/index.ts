@@ -1,5 +1,5 @@
 /**
- * @burdenoff/vibe-plugin-code-server v1.0.0
+ * @vibecontrols/vibe-plugin-tool-code-server
  *
  * Browser-based VS Code via code-server — reverse-proxied through the
  * VibeControls agent. Manages code-server lifecycle (install, start, stop)
@@ -8,50 +8,45 @@
  * Registers:
  *   - Elysia routes: /api/code-server/*  (REST API)
  *   - Proxy routes:  /code-server/*      (reverse proxy to code-server)
- *   - CLI command:   vibe code-server {status,install,start,stop}
+ *   - CLI command:   vibe code-server {status,install,start,stop,restart}
  *
- * Install: vibe plugin install @burdenoff/vibe-plugin-code-server
+ * Migrated to consume `@vibecontrols/plugin-sdk` for the contract,
+ * lifecycle, telemetry, CLI multimode, and redaction helpers.
  */
 
-import type { Elysia } from "elysia";
 import type { Command } from "commander";
-import type { HostServices, VibePlugin } from "./types.js";
-import { getRunningPort, stopCodeServer } from "./lib/process.js";
+
 import {
-  runMultimode,
+  createLifecycleHooks,
   pickOutputMode,
+  redact,
+  runMultimode,
   maybePrintJson,
+  TelemetryEmitter,
+  type HostServices,
   type OutputFlags,
-} from "./utils/multimode.js";
+  type VibePlugin,
+} from "@vibecontrols/plugin-sdk";
+
+import type { CodeServerStatus } from "./types.js";
+import { getRunningPort, stopCodeServer } from "./lib/process.js";
 import { interactiveDetail } from "./utils/interactive.js";
 
-// ---------------------------------------------------------------------------
-// JSON shaping helpers
-// ---------------------------------------------------------------------------
-
-const SECRET_RX = /(token|secret|password|apikey|api_key)/i;
-
-function redact(value: unknown): unknown {
-  if (value === null || value === undefined) return value;
-  if (Array.isArray(value)) return value.map(redact);
-  if (typeof value !== "object") return value;
-  const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-    out[k] = SECRET_RX.test(k) ? "[redacted]" : redact(v);
-  }
-  return out;
-}
-
-// Re-export types for external consumers
 export type {
-  VibePlugin,
-  HostServices,
-  StorageProvider,
-  EventBus,
-  ServiceRegistry,
   CodeServerConfig,
   CodeServerStatus,
+  StartBody,
+  RestartBody,
 } from "./types.js";
+
+/**
+ * Local extension of the SDK contract — agrees additive fields the host
+ * agent reads from the registry (`publicPaths` allowlist) that the SDK
+ * contract leaves to the host implementation.
+ */
+type CodeServerVibePlugin = VibePlugin & {
+  publicPaths?: string[];
+};
 
 // ---------------------------------------------------------------------------
 // CLI helpers
@@ -84,15 +79,31 @@ let agentApiKey: string | null = null;
 // Plugin definition
 // ---------------------------------------------------------------------------
 
-export const vibePlugin: VibePlugin = {
+const PLUGIN_NAME = "code-server";
+const PLUGIN_VERSION = "2026.508.4";
+
+const lifecycle = createLifecycleHooks({
+  name: PLUGIN_NAME,
+  telemetryEventName: "tool.ready",
+  onInit: (hostServices: HostServices) => {
+    const telemetry = new TelemetryEmitter(
+      PLUGIN_NAME,
+      PLUGIN_VERSION,
+      hostServices,
+    );
+    telemetry.emitEvent("tool.ready", { provider: "code-server" });
+  },
+});
+
+export const vibePlugin: CodeServerVibePlugin = {
   capabilities: {
     storage: "rw",
     subprocess: true,
     audit: true,
     telemetry: true,
   },
-  name: "code-server",
-  version: "1.0.0",
+  name: PLUGIN_NAME,
+  version: PLUGIN_VERSION,
   description:
     "Browser-based VS Code via code-server — reverse-proxied through the agent",
   tags: ["backend", "cli"],
@@ -100,25 +111,29 @@ export const vibePlugin: VibePlugin = {
   apiPrefix: "/api/code-server",
   publicPaths: ["/code-server/"],
 
-  async onServerStart(app: Elysia, hostServices: HostServices) {
-    hostServices?.telemetry?.emit("tool.ready", { provider: "code-server" });
+  async onServerStart(app: unknown, hostServices: HostServices) {
+    await lifecycle.onServerStart(app, hostServices);
+
+    // The host agent passes a real Elysia instance.
+    const elysiaApp = app as {
+      use: (plugin: unknown) => unknown;
+      decorator?: { apiKey?: string };
+    };
+
     // Register REST API routes
     const { createCodeServerRoutes } = await import("./routes.js");
-    app.use(createCodeServerRoutes(hostServices));
+    elysiaApp.use(createCodeServerRoutes(hostServices));
 
-    // Capture the API key from the app's decorator for proxy auth
-    // The auth plugin decorates the app with `apiKey`
+    // Capture the API key from the app's decorator for proxy auth.
     try {
-      const decorated = app as unknown as { decorator: { apiKey?: string } };
-      agentApiKey = decorated.decorator?.apiKey ?? null;
+      agentApiKey = elysiaApp.decorator?.apiKey ?? null;
     } catch {
-      // Fallback: use env var
       agentApiKey = process.env.AGENT_API_KEY ?? null;
     }
 
     // Mount reverse proxy at /code-server/*
     const { createCodeServerProxy } = await import("./lib/proxy.js");
-    app.use(
+    elysiaApp.use(
       createCodeServerProxy(
         () => getRunningPort(),
         (key: string) => {
@@ -128,17 +143,18 @@ export const vibePlugin: VibePlugin = {
       ),
     );
 
-    console.log(
-      "  Plugin 'code-server' registered routes: /api/code-server, /code-server",
+    process.stdout.write(
+      "  Plugin 'code-server' registered routes: /api/code-server, /code-server\n",
     );
   },
 
   async onServerStop() {
     await stopCodeServer();
-    console.log("  Plugin 'code-server' stopped");
+    process.stdout.write("  Plugin 'code-server' stopped\n");
   },
 
-  onCliSetup(program: Command) {
+  onCliSetup(programArg: unknown) {
+    const program = programArg as Command;
     const cs = program
       .command("code-server")
       .description("Browser-based VS Code via code-server");
@@ -149,14 +165,14 @@ export const vibePlugin: VibePlugin = {
       .option("--json", "Emit JSON")
       .option("--plain", "Force plain text output")
       .action(async (opts: OutputFlags) => {
-        await runMultimode<unknown>({
+        await runMultimode<CodeServerStatus>({
           mode: pickOutputMode(opts),
           fetchData: async () => {
             const res = await apiFetch("/api/code-server/status");
-            return await res.json();
+            return (await res.json()) as CodeServerStatus;
           },
           plain: (data) => {
-            console.log(JSON.stringify(data, null, 2));
+            process.stdout.write(`${JSON.stringify(data, null, 2)}\n`);
           },
           interactive: async (data) => {
             await interactiveDetail({
@@ -173,14 +189,14 @@ export const vibePlugin: VibePlugin = {
       .description("Install code-server on this machine")
       .option("--json", "Emit JSON")
       .action(async (opts: OutputFlags) => {
-        if (!opts.json) console.log("Installing code-server...");
+        if (!opts.json) process.stdout.write("Installing code-server...\n");
         const res = await apiFetch("/api/code-server/install", {
           method: "POST",
         });
         const data = await res.json();
         if (maybePrintJson(opts, { ok: true, action: "install", result: data }))
           return;
-        console.log(JSON.stringify(data, null, 2));
+        process.stdout.write(`${JSON.stringify(data, null, 2)}\n`);
       });
 
     // vibe code-server start [--path <dir>] [--port <port>]
@@ -201,7 +217,7 @@ export const vibePlugin: VibePlugin = {
         const data = await res.json();
         if (maybePrintJson(opts, { ok: true, action: "start", result: data }))
           return;
-        console.log(JSON.stringify(data, null, 2));
+        process.stdout.write(`${JSON.stringify(data, null, 2)}\n`);
       });
 
     // vibe code-server stop
@@ -215,7 +231,7 @@ export const vibePlugin: VibePlugin = {
         const data = await res.json();
         if (maybePrintJson(opts, { ok: true, action: "stop", result: data }))
           return;
-        console.log(JSON.stringify(data, null, 2));
+        process.stdout.write(`${JSON.stringify(data, null, 2)}\n`);
       });
 
     // vibe code-server restart [--path <dir>]
@@ -234,7 +250,7 @@ export const vibePlugin: VibePlugin = {
         const data = await res.json();
         if (maybePrintJson(opts, { ok: true, action: "restart", result: data }))
           return;
-        console.log(JSON.stringify(data, null, 2));
+        process.stdout.write(`${JSON.stringify(data, null, 2)}\n`);
       });
   },
 };
