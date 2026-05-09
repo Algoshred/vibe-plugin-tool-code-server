@@ -1,6 +1,6 @@
 {
   "name": "@vibecontrols/vibe-plugin-tool-code-server",
-  "version": "2026.508.4",
+  "version": "2026.509.1",
   "main": "./dist/index.js",
   "type": "module",
   "engines": {
