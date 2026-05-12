@@ -33,7 +33,7 @@
     "url": "https://github.com/tvvignesh"
   },
   "license": "SEE LICENSE IN LICENSE",
-  "description": "Browser-based VS Code via code-server — reverse-proxied through the VibeControls agent",
+  "description": "Browser-based VS Code via code-server \u2014 reverse-proxied through the VibeControls agent",
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/bun": "^1.2.10",
