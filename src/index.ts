@@ -50,6 +50,17 @@ type CodeServerVibePlugin = VibePlugin & {
   publicPaths?: string[];
 };
 
+/**
+ * Host methods this plugin consumes that the SDK's `HostServices` contract
+ * leaves to the host implementation (so they're optional here). Extracted as a
+ * named type so the casts below are self-documenting and easy to extend when
+ * the host grows more optional methods — or to drop once the SDK ships them.
+ */
+type CodeServerHostServices = HostServices & {
+  validateApiKey?: (key: string) => boolean;
+  setCodeServerSessionValidator?: (fn: (token: string) => boolean) => void;
+};
+
 // ---------------------------------------------------------------------------
 // CLI helpers
 // ---------------------------------------------------------------------------
@@ -129,23 +140,37 @@ export const createPlugin: VibePluginFactory = (
       const { createCodeServerRoutes } = await import("./routes.js");
       elysiaApp.use(createCodeServerRoutes(hostServices));
 
-      // Capture the API key from the app's decorator for proxy auth.
+      // Snapshot the API key from the app's decorator — used only as a
+      // fallback for hosts that don't expose a live validator (below).
       try {
         agentApiKey = elysiaApp.decorator?.apiKey ?? null;
       } catch {
         agentApiKey = process.env.AGENT_API_KEY ?? null;
       }
 
+      // Prefer the host's LIVE key validator. The agent rotates its API key
+      // at finalize (bindApiKey), so the snapshot captured here goes stale and
+      // would 401 the *current* valid key — which is exactly what broke the
+      // editor proxy. `validateApiKey` is optional on older hosts, so fall
+      // back to the captured key when it's absent.
+      const liveValidate = (hostServices as CodeServerHostServices)
+        .validateApiKey;
+      const validateKey = (key: string): boolean => {
+        if (typeof liveValidate === "function") return liveValidate(key);
+        return !!agentApiKey && key === agentApiKey;
+      };
+
       // Mount reverse proxy at /code-server/*
-      const { createCodeServerProxy } = await import("./lib/proxy.js");
-      elysiaApp.use(
-        createCodeServerProxy(
-          () => getRunningPort(),
-          (key: string) => {
-            if (!agentApiKey) return false;
-            return key === agentApiKey;
-          },
-        ),
+      const { createCodeServerProxy, validateSessionToken } =
+        await import("./lib/proxy.js");
+      elysiaApp.use(createCodeServerProxy(() => getRunningPort(), validateKey));
+
+      // The editor opens its own WebSockets (management/renderer) that carry
+      // the proxy's session cookie, not the api key. The agent's WS bridge
+      // can't see this plugin's session store, so register the validator with
+      // it — otherwise the workbench WS handshake times out.
+      (hostServices as CodeServerHostServices).setCodeServerSessionValidator?.(
+        validateSessionToken,
       );
 
       process.stdout.write(
