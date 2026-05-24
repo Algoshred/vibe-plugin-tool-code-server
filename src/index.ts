@@ -151,8 +151,20 @@ export const createPlugin: VibePluginFactory = (
       };
 
       // Mount reverse proxy at /code-server/*
-      const { createCodeServerProxy } = await import("./lib/proxy.js");
+      const { createCodeServerProxy, validateSessionToken } = await import(
+        "./lib/proxy.js"
+      );
       elysiaApp.use(createCodeServerProxy(() => getRunningPort(), validateKey));
+
+      // The editor opens its own WebSockets (management/renderer) that carry
+      // the proxy's session cookie, not the api key. The agent's WS bridge
+      // can't see this plugin's session store, so register the validator with
+      // it — otherwise the workbench WS handshake times out.
+      (
+        hostServices as {
+          setCodeServerSessionValidator?: (fn: (token: string) => boolean) => void;
+        }
+      ).setCodeServerSessionValidator?.(validateSessionToken);
 
       process.stdout.write(
         "  Plugin 'code-server' registered routes: /api/code-server, /code-server\n",

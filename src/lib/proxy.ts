@@ -42,7 +42,7 @@ function createSession(): Session {
   return session;
 }
 
-function validateSessionToken(token: string): boolean {
+export function validateSessionToken(token: string): boolean {
   const session = sessions.get(token);
   if (!session) return false;
   if (Date.now() > session.expiresAt) {
