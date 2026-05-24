@@ -467,6 +467,11 @@ async function handleHttpProxy(
       const isWorkbenchDoc = body.includes("code/didStartRenderer");
       const out = isWorkbenchDoc ? injectEditorLoader(body) : body;
       responseHeaders.delete("content-encoding");
+      // The body no longer matches the upstream representation (decoded, and
+      // injected for the workbench doc), so its cache validators are stale —
+      // drop them so conditional requests / caches don't serve the wrong entity.
+      responseHeaders.delete("etag");
+      responseHeaders.delete("last-modified");
       responseHeaders.set(
         "content-length",
         String(Buffer.byteLength(out, "utf8")),
