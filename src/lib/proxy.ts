@@ -124,7 +124,7 @@ const EDITOR_LOADER_SNIPPET = `<div id="vibe-cs-loader" role="status" aria-label
 <div style="font-size:13px;letter-spacing:0.3px;opacity:0.85;">Starting editor…</div>
 <style>@keyframes vibe-cs-spin{to{transform:rotate(360deg)}}</style>
 </div>
-<script>(function(){function r(){var l=document.getElementById('vibe-cs-loader');if(l&&l.parentNode)l.parentNode.removeChild(l);}try{var o=new MutationObserver(function(){if(document.querySelector('.monaco-workbench')){r();o.disconnect();}});o.observe(document.documentElement,{childList:true,subtree:true});}catch(e){}setTimeout(r,30000);})();</script>`;
+<script>(function(){function r(){var l=document.getElementById('vibe-cs-loader');if(l&&l.parentNode)l.parentNode.removeChild(l);}var o;try{o=new MutationObserver(function(){if(document.querySelector('.monaco-workbench')){r();o.disconnect();}});o.observe(document.documentElement,{childList:true,subtree:true});}catch(e){}setTimeout(function(){r();if(o)o.disconnect();},30000);})();</script>`;
 
 /**
  * Insert the loading overlay right after the opening <body> tag so it paints
@@ -451,26 +451,27 @@ async function handleHttpProxy(
       }
     });
 
-    // Inject the loading overlay into the top-level workbench HTML document
-    // only — not /static/ assets or the hidden web-worker extension-host
-    // iframe (also text/html). Rewriting the body changes its length, so the
-    // upstream content-length must be recomputed.
+    // Inject the loading overlay ONLY into the top-level VS Code workbench
+    // document. We gate on the GET method (skips HEAD, whose body is empty) and
+    // a workbench bootstrap marker in the HTML — not a path heuristic — so the
+    // spinner never shows on /static/ assets, the hidden web-worker iframe, or
+    // code-server's login/error pages. Reading the body decodes any
+    // content-encoding and changes its length, so both headers are recomputed.
     const contentType = upstreamResponse.headers.get("content-type") ?? "";
     if (
+      request.method === "GET" &&
       upstreamResponse.ok &&
-      contentType.includes("text/html") &&
-      !strippedPath.includes("/static/")
+      contentType.includes("text/html")
     ) {
-      const injected = injectEditorLoader(await upstreamResponse.text());
-      // `.text()` returns the decompressed body, so the upstream
-      // content-encoding (e.g. br/gzip) no longer applies — drop it and
-      // recompute the length, otherwise the browser tries to decode plain text.
+      const body = await upstreamResponse.text();
+      const isWorkbenchDoc = body.includes("code/didStartRenderer");
+      const out = isWorkbenchDoc ? injectEditorLoader(body) : body;
       responseHeaders.delete("content-encoding");
       responseHeaders.set(
         "content-length",
-        String(Buffer.byteLength(injected, "utf8")),
+        String(Buffer.byteLength(out, "utf8")),
       );
-      return new Response(injected, {
+      return new Response(out, {
         status: upstreamResponse.status,
         statusText: upstreamResponse.statusText,
         headers: responseHeaders,
