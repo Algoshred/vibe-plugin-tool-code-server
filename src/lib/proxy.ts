@@ -110,6 +110,35 @@ const STRIP_RESPONSE_HEADERS = new Set([
   "x-content-type-options",
 ]);
 
+// ── Loading overlay ──────────────────────────────────────────────────────
+//
+// Injected into the main code-server HTML document so the user sees a spinner
+// instead of a blank white page while `workbench.js` downloads and the remote
+// connection is established. The overlay removes itself as soon as the VS Code
+// workbench mounts (`.monaco-workbench`), with a hard fallback so it can never
+// get stuck. Inline <style>/<script> are safe because this proxy strips the
+// upstream Content-Security-Policy above.
+
+const EDITOR_LOADER_SNIPPET = `<div id="vibe-cs-loader" role="status" aria-label="Starting editor" style="position:fixed;inset:0;z-index:2147483647;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;background:#1e1e1e;color:#cccccc;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+<div style="width:42px;height:42px;border:3px solid rgba(255,255,255,0.15);border-top-color:#3794ff;border-radius:50%;animation:vibe-cs-spin 0.8s linear infinite;"></div>
+<div style="font-size:13px;letter-spacing:0.3px;opacity:0.85;">Starting editor…</div>
+<style>@keyframes vibe-cs-spin{to{transform:rotate(360deg)}}</style>
+</div>
+<script>(function(){function r(){var l=document.getElementById('vibe-cs-loader');if(l&&l.parentNode)l.parentNode.removeChild(l);}try{var o=new MutationObserver(function(){if(document.querySelector('.monaco-workbench')){r();o.disconnect();}});o.observe(document.documentElement,{childList:true,subtree:true});}catch(e){}setTimeout(r,30000);})();</script>`;
+
+/**
+ * Insert the loading overlay right after the opening <body> tag so it paints
+ * immediately. Falls back to prepending if no <body> is found.
+ */
+function injectEditorLoader(html: string): string {
+  const bodyOpen = html.match(/<body[^>]*>/i);
+  if (bodyOpen && bodyOpen.index !== undefined) {
+    const at = bodyOpen.index + bodyOpen[0].length;
+    return html.slice(0, at) + EDITOR_LOADER_SNIPPET + html.slice(at);
+  }
+  return EDITOR_LOADER_SNIPPET + html;
+}
+
 // ── WebSocket bridge state ───────────────────────────────────────────────
 
 interface BridgeState {
@@ -421,6 +450,32 @@ async function handleHttpProxy(
         responseHeaders.set(key, value);
       }
     });
+
+    // Inject the loading overlay into the top-level workbench HTML document
+    // only — not /static/ assets or the hidden web-worker extension-host
+    // iframe (also text/html). Rewriting the body changes its length, so the
+    // upstream content-length must be recomputed.
+    const contentType = upstreamResponse.headers.get("content-type") ?? "";
+    if (
+      upstreamResponse.ok &&
+      contentType.includes("text/html") &&
+      !strippedPath.includes("/static/")
+    ) {
+      const injected = injectEditorLoader(await upstreamResponse.text());
+      // `.text()` returns the decompressed body, so the upstream
+      // content-encoding (e.g. br/gzip) no longer applies — drop it and
+      // recompute the length, otherwise the browser tries to decode plain text.
+      responseHeaders.delete("content-encoding");
+      responseHeaders.set(
+        "content-length",
+        String(Buffer.byteLength(injected, "utf8")),
+      );
+      return new Response(injected, {
+        status: upstreamResponse.status,
+        statusText: upstreamResponse.statusText,
+        headers: responseHeaders,
+      });
+    }
 
     return new Response(upstreamResponse.body, {
       status: upstreamResponse.status,
