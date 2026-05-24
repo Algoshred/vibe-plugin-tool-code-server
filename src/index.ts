@@ -129,24 +129,30 @@ export const createPlugin: VibePluginFactory = (
       const { createCodeServerRoutes } = await import("./routes.js");
       elysiaApp.use(createCodeServerRoutes(hostServices));
 
-      // Capture the API key from the app's decorator for proxy auth.
+      // Snapshot the API key from the app's decorator — used only as a
+      // fallback for hosts that don't expose a live validator (below).
       try {
         agentApiKey = elysiaApp.decorator?.apiKey ?? null;
       } catch {
         agentApiKey = process.env.AGENT_API_KEY ?? null;
       }
 
+      // Prefer the host's LIVE key validator. The agent rotates its API key
+      // at finalize (bindApiKey), so the snapshot captured here goes stale and
+      // would 401 the *current* valid key — which is exactly what broke the
+      // editor proxy. `validateApiKey` is optional on older hosts, so fall
+      // back to the captured key when it's absent.
+      const liveValidate = (
+        hostServices as { validateApiKey?: (key: string) => boolean }
+      ).validateApiKey;
+      const validateKey = (key: string): boolean => {
+        if (typeof liveValidate === "function") return liveValidate(key);
+        return !!agentApiKey && key === agentApiKey;
+      };
+
       // Mount reverse proxy at /code-server/*
       const { createCodeServerProxy } = await import("./lib/proxy.js");
-      elysiaApp.use(
-        createCodeServerProxy(
-          () => getRunningPort(),
-          (key: string) => {
-            if (!agentApiKey) return false;
-            return key === agentApiKey;
-          },
-        ),
-      );
+      elysiaApp.use(createCodeServerProxy(() => getRunningPort(), validateKey));
 
       process.stdout.write(
         "  Plugin 'code-server' registered routes: /api/code-server, /code-server\n",
