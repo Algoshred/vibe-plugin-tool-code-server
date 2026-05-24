@@ -110,6 +110,35 @@ const STRIP_RESPONSE_HEADERS = new Set([
   "x-content-type-options",
 ]);
 
+// ── Loading overlay ──────────────────────────────────────────────────────
+//
+// Injected into the main code-server HTML document so the user sees a spinner
+// instead of a blank white page while `workbench.js` downloads and the remote
+// connection is established. The overlay removes itself as soon as the VS Code
+// workbench mounts (`.monaco-workbench`), with a hard fallback so it can never
+// get stuck. Inline <style>/<script> are safe because this proxy strips the
+// upstream Content-Security-Policy above.
+
+const EDITOR_LOADER_SNIPPET = `<div id="vibe-cs-loader" role="status" aria-label="Starting editor" style="position:fixed;inset:0;z-index:2147483647;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;background:#1e1e1e;color:#cccccc;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+<div style="width:42px;height:42px;border:3px solid rgba(255,255,255,0.15);border-top-color:#3794ff;border-radius:50%;animation:vibe-cs-spin 0.8s linear infinite;"></div>
+<div style="font-size:13px;letter-spacing:0.3px;opacity:0.85;">Starting editor…</div>
+<style>@keyframes vibe-cs-spin{to{transform:rotate(360deg)}}</style>
+</div>
+<script>(function(){function r(){var l=document.getElementById('vibe-cs-loader');if(l&&l.parentNode)l.parentNode.removeChild(l);}var o;try{o=new MutationObserver(function(){if(document.querySelector('.monaco-workbench')){r();o.disconnect();}});o.observe(document.documentElement,{childList:true,subtree:true});}catch(e){}setTimeout(function(){r();if(o)o.disconnect();},30000);})();</script>`;
+
+/**
+ * Insert the loading overlay right after the opening <body> tag so it paints
+ * immediately. Falls back to prepending if no <body> is found.
+ */
+function injectEditorLoader(html: string): string {
+  const bodyOpen = html.match(/<body[^>]*>/i);
+  if (bodyOpen && bodyOpen.index !== undefined) {
+    const at = bodyOpen.index + bodyOpen[0].length;
+    return html.slice(0, at) + EDITOR_LOADER_SNIPPET + html.slice(at);
+  }
+  return EDITOR_LOADER_SNIPPET + html;
+}
+
 // ── WebSocket bridge state ───────────────────────────────────────────────
 
 interface BridgeState {
@@ -421,6 +450,38 @@ async function handleHttpProxy(
         responseHeaders.set(key, value);
       }
     });
+
+    // Inject the loading overlay ONLY into the top-level VS Code workbench
+    // document. We gate on the GET method (skips HEAD, whose body is empty) and
+    // a workbench bootstrap marker in the HTML — not a path heuristic — so the
+    // spinner never shows on /static/ assets, the hidden web-worker iframe, or
+    // code-server's login/error pages. Reading the body decodes any
+    // content-encoding and changes its length, so both headers are recomputed.
+    const contentType = upstreamResponse.headers.get("content-type") ?? "";
+    if (
+      request.method === "GET" &&
+      upstreamResponse.ok &&
+      contentType.includes("text/html")
+    ) {
+      const body = await upstreamResponse.text();
+      const isWorkbenchDoc = body.includes("code/didStartRenderer");
+      const out = isWorkbenchDoc ? injectEditorLoader(body) : body;
+      responseHeaders.delete("content-encoding");
+      // The body no longer matches the upstream representation (decoded, and
+      // injected for the workbench doc), so its cache validators are stale —
+      // drop them so conditional requests / caches don't serve the wrong entity.
+      responseHeaders.delete("etag");
+      responseHeaders.delete("last-modified");
+      responseHeaders.set(
+        "content-length",
+        String(Buffer.byteLength(out, "utf8")),
+      );
+      return new Response(out, {
+        status: upstreamResponse.status,
+        statusText: upstreamResponse.statusText,
+        headers: responseHeaders,
+      });
+    }
 
     return new Response(upstreamResponse.body, {
       status: upstreamResponse.status,
