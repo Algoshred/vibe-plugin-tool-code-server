@@ -19,8 +19,65 @@ interface Session {
   expiresAt: number;
 }
 
-const SESSION_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const SESSION_TTL_MS = 60 * 60 * 1000; // 1 hour
 const COOKIE_NAME = "__vibe_cs_session";
+
+// ── URL/header sanitisation helpers ──────────────────────────────────────
+//
+// The `apiKey` query param is a credential meant only for the proxy
+// boundary — upstream tools (code-server here) must never see it. We also
+// strip the Referer header for the same reason: it can leak the apiKey
+// when the browser navigated from a URL that carried `?apiKey=`.
+
+/**
+ * Return `url.search` with any `apiKey` param (case-insensitive) removed.
+ * Returns "" if no params remain, or "?…" otherwise.
+ */
+function searchWithoutApiKey(url: URL): string {
+  const sp = new URLSearchParams();
+  for (const [k, v] of url.searchParams) {
+    if (k.toLowerCase() === "apikey") continue;
+    sp.append(k, v);
+  }
+  const s = sp.toString();
+  return s ? `?${s}` : "";
+}
+
+/**
+ * For mutating requests authenticated by a session cookie, require an
+ * Origin or Referer that matches the proxy's own host. This is a CSRF
+ * shield — the cookie is SameSite=None for iframe embedding, so the
+ * browser will send it on cross-site requests; the origin check is what
+ * prevents a malicious site from issuing state-changing requests.
+ *
+ * GET/HEAD are exempt (read-only). Requests authenticated purely by
+ * API-key header/param are exempt — the caller already proved possession
+ * of the credential, no CSRF risk.
+ */
+function originAllowed(request: Request): boolean {
+  const method = request.method.toUpperCase();
+  if (method === "GET" || method === "HEAD") return true;
+
+  const proxyHost = new URL(request.url).host;
+  const origin = request.headers.get("origin");
+  if (origin) {
+    try {
+      return new URL(origin).host === proxyHost;
+    } catch {
+      return false;
+    }
+  }
+  const referer = request.headers.get("referer");
+  if (referer) {
+    try {
+      return new URL(referer).host === proxyHost;
+    } catch {
+      return false;
+    }
+  }
+  // No Origin and no Referer on a mutating request — reject.
+  return false;
+}
 
 const sessions = new Map<string, Session>();
 
@@ -364,6 +421,16 @@ async function handleProxyRequest(
     );
   }
 
+  // CSRF guard for cookie-authed mutating requests. If the caller has a
+  // valid API key they've already proven possession of the credential and
+  // are exempt from the origin check.
+  if (!hasValidApiKey && hasValidSession && !originAllowed(request)) {
+    return new Response(
+      JSON.stringify({ error: "Forbidden — invalid Origin" }),
+      { status: 403, headers: { "Content-Type": "application/json" } },
+    );
+  }
+
   // If authenticated via API key but no session cookie, create session and
   // serve the proxied content directly (with Set-Cookie header).
   // We avoid a 302 redirect because cross-origin iframes won't carry the
@@ -408,7 +475,10 @@ async function handleHttpProxy(
 ): Promise<Response> {
   const url = new URL(request.url);
   const strippedPath = stripPrefix(url.pathname);
-  const upstreamUrl = `http://127.0.0.1:${port}${strippedPath}${url.search}`;
+  // Strip apiKey from the query before forwarding — it's a proxy-boundary
+  // credential and must never reach code-server.
+  const sanitisedSearch = searchWithoutApiKey(url);
+  const upstreamUrl = `http://127.0.0.1:${port}${strippedPath}${sanitisedSearch}`;
 
   // Build upstream headers (copy most, skip hop-by-hop)
   const upstreamHeaders = new Headers();
@@ -421,6 +491,8 @@ async function handleHttpProxy(
     "upgrade",
     "proxy-authorization",
     "proxy-authenticate",
+    // Drop Referer — it may contain `?apiKey=` from the parent iframe URL.
+    "referer",
   ]);
 
   request.headers.forEach((value, key) => {
