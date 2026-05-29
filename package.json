@@ -29,10 +29,9 @@
   ],
   "author": {
     "name": "Vignesh T.V",
-    "email": "vignesh@burdenoff.com",
     "url": "https://github.com/tvvignesh"
   },
-  "license": "SEE LICENSE IN LICENSE",
+  "license": "MIT",
   "description": "Browser-based VS Code via code-server — reverse-proxied through the VibeControls agent",
   "devDependencies": {
     "@eslint/js": "^10.0.1",
