@@ -183,6 +183,16 @@ export const createPlugin: VibePluginFactory = (
       process.stdout.write("  Plugin 'code-server' stopped\n");
     },
 
+    // `vibe nuke` runs this before the plugin is uninstalled: stop the
+    // long-running code-server process this plugin spawned so it never
+    // outlives the agent. The agent names no provider — this knowledge
+    // lives here. User config under code-server's own dirs is left intact.
+    async onNuke(_hostServices, ctx) {
+      if (ctx.dryRun) return { reaped: ["code-server process"] };
+      await stopCodeServer();
+      return { reaped: ["code-server process"] };
+    },
+
     onCliSetup(programArg: unknown) {
       const program = programArg as Command;
       const cs = program
