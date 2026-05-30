@@ -5,6 +5,8 @@
  * code-server binds to 127.0.0.1 only — access is via the agent reverse proxy.
  */
 
+import { homedir } from "node:os";
+
 import type { Subprocess } from "bun";
 import type { CodeServerStatus } from "../types.js";
 
@@ -83,7 +85,7 @@ export async function startCodeServer(
 
   try {
     const port = await findAvailablePort(options?.port);
-    const workspacePath = options?.workspacePath || process.env.HOME || "/";
+    const workspacePath = options?.workspacePath || homedir();
 
     const args = [
       binaryPath,

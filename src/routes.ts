@@ -14,6 +14,8 @@
  * concerns like prefix, error handler, and logging fold through the SDK.
  */
 
+import { homedir } from "node:os";
+
 import type { Elysia } from "elysia";
 
 import { RoutesBuilder } from "@vibecontrols/plugin-sdk/routes";
@@ -127,7 +129,7 @@ export function createCodeServerRoutes(hostServices: HostServices): Elysia {
           message: "code-server started",
           pid: result.pid,
           port: result.port,
-          workspacePath: workspacePath || process.env.HOME || "/",
+          workspacePath: workspacePath || homedir(),
         };
       } catch (err) {
         set.status = 500;
@@ -161,7 +163,7 @@ export function createCodeServerRoutes(hostServices: HostServices): Elysia {
           message: "code-server restarted",
           pid: result.pid,
           port: result.port,
-          workspacePath: workspacePath || process.env.HOME || "/",
+          workspacePath: workspacePath || homedir(),
         };
       } catch (err) {
         set.status = 500;
