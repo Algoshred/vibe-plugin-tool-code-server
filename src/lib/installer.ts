@@ -29,7 +29,7 @@ const SEARCH_PATHS = [
 async function resolveBinaryPath(): Promise<string | null> {
   // Bun.which works on every platform (POSIX + Windows) and honors PATHEXT
   // so it picks up `code-server.cmd` on Windows automatically.
-  const found = Bun.which("code-server");
+  const found = Bun.which("code-server", { PATH: process.env.PATH });
   if (found) return found;
 
   // Check known paths
