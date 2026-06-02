@@ -173,6 +173,44 @@ export const createPlugin: VibePluginFactory = (
         validateSessionToken,
       );
 
+      // Best-effort: ensure the code-server BINARY is present so the editor is
+      // usable as soon as the plugin loads. The npm package ships only the
+      // agent-side proxy/lifecycle glue — not the ~100MB code-server binary —
+      // so a fresh agent that just installed this plugin (e.g. via the first-run
+      // `editor` ability) would otherwise report `installed: false` and the FE
+      // "Open Editor" action would fail. Fire-and-forget so it never blocks
+      // agent boot, guarded so it only runs when the binary is genuinely
+      // missing, and failure-tolerant: hosts without a standalone build for
+      // their libc (e.g. Alpine/musl) just log and the operator can retry via
+      // `vibe code-server install` or the Plugins tab.
+      void (async () => {
+        try {
+          const storage =
+            hostServices.storage as unknown as import("./types.js").AgentStorageProvider;
+          const { checkInstallation, installCodeServer } =
+            await import("./lib/installer.js");
+          const status = await checkInstallation(storage);
+          if (status.installed) return;
+          process.stdout.write(
+            "  Plugin 'code-server': binary not found — installing in the background...\n",
+          );
+          const result = await installCodeServer(storage);
+          if (result.success) {
+            process.stdout.write(
+              `  Plugin 'code-server': binary installed at ${result.binaryPath}\n`,
+            );
+          } else {
+            process.stderr.write(
+              `  Plugin 'code-server': binary auto-install skipped (${result.error ?? "unknown error"}). Retry with 'vibe code-server install'.\n`,
+            );
+          }
+        } catch (err) {
+          process.stderr.write(
+            `  Plugin 'code-server': binary auto-install error: ${err instanceof Error ? err.message : String(err)}\n`,
+          );
+        }
+      })();
+
       process.stdout.write(
         "  Plugin 'code-server' registered routes: /api/code-server, /code-server\n",
       );
