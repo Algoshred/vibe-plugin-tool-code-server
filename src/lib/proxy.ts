@@ -555,6 +555,23 @@ async function handleHttpProxy(
       });
     }
 
+    // Streaming passthrough for everything else (JS, CSS, fonts, wasm, …).
+    //
+    // Bun's `fetch()` transparently DECODES the upstream body when it carried a
+    // `Content-Encoding` (gzip/deflate/br) — `upstreamResponse.body` is already
+    // the decompressed stream — but it leaves the original `content-encoding`
+    // and the now-stale (compressed) `content-length` on the response headers.
+    // Forwarding those verbatim makes the browser try to inflate already-plain
+    // bytes and/or truncate the body to the compressed length. For binary
+    // assets this corrupts them: the codicon icon font then fails to decode
+    // ("incorrect file size in WOFF header" / OTS parsing errors) and the
+    // editor renders with missing icons. Drop both headers when the upstream
+    // response was encoded so the decoded body streams out correctly (chunked).
+    if (responseHeaders.has("content-encoding")) {
+      responseHeaders.delete("content-encoding");
+      responseHeaders.delete("content-length");
+    }
+
     return new Response(upstreamResponse.body, {
       status: upstreamResponse.status,
       statusText: upstreamResponse.statusText,
