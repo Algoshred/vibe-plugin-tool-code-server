@@ -61,7 +61,7 @@ async function getVersion(binaryPath: string): Promise<string | null> {
     if (exitCode === 0) {
       // code-server --version outputs something like "4.96.4\n..."
       const firstLine = output.trim().split("\n")[0];
-      return firstLine.trim();
+      return firstLine?.trim() ?? null;
     }
   } catch {
     // version check failed
