@@ -39,7 +39,7 @@
   "devDependencies": {
     "@burdenoff/toolchain": "2026.1107.14",
     "@types/bun": "^1.4.4",
-    "commander": "^14.0.3",
+    "commander": "^15.0.0",
     "elysia": "^1.4.29",
     "eslint": "^9.39.5",
     "knip": "^6.44.1",
